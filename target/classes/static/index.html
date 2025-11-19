@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Buscador RAG: Solr + Gemma</title>
+    <style>
+      /* --- Estilos Base (Igual que antes) --- */
+      :root {
+        --primary-color: #4285f4;
+        --bg-color: #f2f2f2;
+        --card-bg: #ffffff;
+        --text-color: #202124;
+        --ai-color: #3d2e56; /* Color morado oscuro para la sección IA */
+        --ai-bg: #f0f4ff; /* Fondo azul muy claro para IA */
+      }
+
+      body {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background-color: var(--bg-color);
+        margin: 0;
+        padding: 0;
+        color: var(--text-color);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        min-height: 100vh;
+      }
+
+      .header {
+        background-color: var(--card-bg);
+        width: 100%;
+        padding: 20px;
+        box-shadow: 0 1px 6px rgba(32, 33, 36, 0.1);
+        display: flex;
+        justify-content: center;
+        position: sticky;
+        top: 0;
+        z-index: 100;
+      }
+
+      .search-container {
+        display: flex;
+        width: 100%;
+        max-width: 600px;
+        position: relative;
+      }
+
+      input#query {
+        width: 100%;
+        padding: 12px 20px;
+        font-size: 16px;
+        border: 1px solid #dfe1e5;
+        border-radius: 24px;
+        outline: none;
+        transition: box-shadow 0.3s;
+      }
+
+      button#btn-search {
+        position: absolute;
+        right: 5px;
+        top: 3px;
+        background-color: var(--primary-color);
+        color: white;
+        border: none;
+        border-radius: 50%;
+        width: 40px;
+        height: 40px;
+        cursor: pointer;
+        font-weight: bold;
+      }
+
+      /* --- Contenedores --- */
+      .main-container {
+        width: 100%;
+        max-width: 800px;
+        padding: 20px;
+        flex-grow: 1;
+      }
+
+      /* --- SECCIÓN IA (NUEVO) --- */
+      .ai-container {
+        background: linear-gradient(135deg, #ffffff 0%, #f4f8ff 100%);
+        border: 1px solid #dbe4ff;
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 25px;
+        box-shadow: 0 2px 8px rgba(66, 133, 244, 0.15);
+        display: none; /* Oculto hasta que se busque */
+      }
+
+      .ai-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 10px;
+        font-weight: bold;
+        color: var(--primary-color);
+      }
+
+      .ai-content {
+        color: #333;
+        line-height: 1.6;
+        font-size: 0.95rem;
+        white-space: pre-wrap; /* Respeta saltos de línea del LLM */
+      }
+
+      .ai-loading {
+        font-style: italic;
+        color: #666;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      /* Animación de carga simple */
+      .spinner {
+        width: 16px;
+        height: 16px;
+        border: 2px solid #f3f3f3;
+        border-top: 2px solid var(--primary-color);
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+      }
+      @keyframes spin {
+        0% {
+          transform: rotate(0deg);
+        }
+        100% {
+          transform: rotate(360deg);
+        }
+      }
+
+      /* --- Resultados Solr --- */
+      .result-card {
+        background: var(--card-bg);
+        padding: 15px;
+        margin-bottom: 15px;
+        border-radius: 8px;
+        box-shadow: 0 1px 2px rgba(60, 64, 67, 0.1);
+      }
+
+      .result-title a {
+        color: #1a0dab;
+        font-size: 1.2rem;
+        text-decoration: none;
+        text-transform: capitalize;
+      }
+
+      .result-snippet {
+        color: #4d5156;
+        font-size: 0.95rem;
+      }
+
+      .snippet-expandable {
+        cursor: pointer;
+      }
+      .text-full {
+        display: none;
+      }
+
+      /* Paginación */
+      .pagination {
+        display: flex;
+        justify-content: center;
+        padding: 20px;
+        gap: 5px;
+      }
+      .page-btn {
+        border: none;
+        background: transparent;
+        padding: 8px 12px;
+        cursor: pointer;
+      }
+      .page-btn.active {
+        background-color: var(--primary-color);
+        color: white;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <div class="search-container">
+        <input
+          type="text"
+          id="query"
+          placeholder="Pregunta a Solr + Gemma..."
+          onkeydown="if(event.key === 'Enter') { event.preventDefault(); triggerSearch(); }"
+        />
+        <button id="btn-search" type="button" onclick="triggerSearch()">
+          ✨
+        </button>
+      </div>
+    </div>
+
+    <div class="main-container">
+      <div id="ai-box" class="ai-container">
+        <div class="ai-header">
+          <span>✨ Resumen generado por IA</span>
+        </div>
+        <div id="ai-output" class="ai-content"></div>
+      </div>
+
+      <div
+        id="stats"
+        style="color: #666; font-size: 0.9em; margin-bottom: 10px"
+      ></div>
+      <div id="results-list"></div>
+      <div id="pagination" class="pagination"></div>
+    </div>
+
+    <script>
+      // --- CONFIGURACIÓN LLM ---
+      const LLM_API_URL = "http://192.168.1.10:1234/v1/chat/completions";
+      const MODEL_ID = "google/gemma-3n-e4b"; // El ID que aparece en tu captura
+      const MAX_CONTEXT_DOCS = 4; // Solo le enviamos los top 4 docs para no saturar la ventana de contexto
+
+      // --- CONFIGURACIÓN SOLR ---
+      const ROWS_PER_PAGE = 10;
+      let currentPage = 1;
+      let currentQuery = "";
+
+      function triggerSearch(page = 1) {
+        const input = document.getElementById("query");
+        const query = input.value.trim();
+        if (!query) return;
+        currentQuery = query;
+        currentPage = page;
+
+        // Limpiar UI de IA si es una búsqueda nueva
+        if (page === 1) resetAI();
+
+        fetchResults(currentQuery, currentPage);
+      }
+
+      function resetAI() {
+        const aiBox = document.getElementById("ai-box");
+        const aiOutput = document.getElementById("ai-output");
+        aiBox.style.display = "none";
+        aiOutput.innerHTML = "";
+      }
+
+      async function fetchResults(query, page) {
+        const list = document.getElementById("results-list");
+        const stats = document.getElementById("stats");
+        const pagination = document.getElementById("pagination");
+
+        // Loader visual simple
+        if (page === 1)
+          list.innerHTML =
+            '<div style="padding:20px; text-align:center;">Buscando...</div>';
+
+        try {
+          // 1. Buscar en Solr
+          const response = await fetch(
+            `/api/query?q=${encodeURIComponent(query)}`
+          );
+          if (!response.ok) throw new Error("Error en Solr");
+
+          const allDocs = await response.json();
+          const totalResults = allDocs.length;
+
+          // 2. Renderizar Resultados Solr (igual que antes)
+          const startIndex = (page - 1) * ROWS_PER_PAGE;
+          const endIndex = startIndex + ROWS_PER_PAGE;
+          const docsOnThisPage = allDocs.slice(startIndex, endIndex);
+
+          list.innerHTML = ""; // Limpiar loader
+          renderResults(docsOnThisPage, totalResults);
+          renderPagination(totalResults, page);
+
+          // 3. DISPARAR RAG (Solo en la página 1 y si hay resultados)
+          if (page === 1 && allDocs.length > 0) {
+            // Enviamos los primeros docs como contexto
+            const contextDocs = allDocs.slice(0, MAX_CONTEXT_DOCS);
+            generateAIAnswer(query, contextDocs);
+          }
+        } catch (error) {
+          console.error(error);
+          list.innerHTML = `<p style="color: red;">Error: ${error.message}</p>`;
+        }
+      }
+
+      // --- FUNCIÓN RAG (La Magia) ---
+      async function generateAIAnswer(userQuery, docs) {
+        const aiBox = document.getElementById("ai-box");
+        const aiOutput = document.getElementById("ai-output");
+
+        // Mostrar caja con estado de carga
+        aiBox.style.display = "block";
+        aiOutput.innerHTML = `<div class="ai-loading"><div class="spinner"></div> Consultando a Gemma...</div>`;
+
+        // Crear el contexto uniendo los textos de los documentos
+        const contextText = docs
+          .map((d) => `- ${d.descripcionAsString}`)
+          .join("\n");
+
+        // Prompt System: Le decimos al modelo cómo comportarse
+        const systemPrompt = `Eres un asistente útil. Responde a la pregunta del usuario basándote ÚNICAMENTE en la información del contexto proporcionado. Si la respuesta no está en el contexto, responde brevemente con un resumen de los documentos. Sé conciso.`;
+
+        // Prompt User
+        const userPrompt = `Contexto:\n${contextText}\n\nPregunta: ${userQuery}`;
+
+        const payload = {
+          model: MODEL_ID,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt },
+          ],
+          temperature: 0.3, // Bajo para que sea factual y no alucine
+          max_tokens: 300,
+        };
+
+        try {
+          const response = await fetch(LLM_API_URL, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              // Si tu servidor requiere Auth, añádelo aquí: "Authorization": "Bearer sk-..."
+            },
+            body: JSON.stringify(payload),
+          });
+
+          if (!response.ok) throw new Error("Error conectando al LLM");
+
+          const data = await response.json();
+
+          // Extraer respuesta (Formato estándar OpenAI/LM Studio)
+          const aiText = data.choices[0].message.content;
+
+          // Efecto de escritura (opcional, pero queda bonito)
+          aiOutput.innerHTML = "";
+          let i = 0;
+          const interval = setInterval(() => {
+            aiOutput.textContent += aiText.charAt(i);
+            i++;
+            if (i > aiText.length - 1) clearInterval(interval);
+          }, 10); // Velocidad de escritura
+        } catch (error) {
+          console.error("Error LLM:", error);
+          aiOutput.innerHTML = `<span style="color:orange">El servidor de IA no responde (192.168.1.10). Verifica que esté encendido y CORS habilitado.</span>`;
+        }
+      }
+
+      // --- Funciones Auxiliares de Renderizado (Tu código anterior) ---
+      function renderResults(docs, total) {
+        const list = document.getElementById("results-list");
+        const stats = document.getElementById("stats");
+        stats.textContent = `Cerca de ${total} resultados encontrados`;
+
+        docs.forEach((doc) => {
+          const fullText = doc.descripcionAsString || "Sin descripción";
+          const idRef = doc.id || "?";
+          const isLong = fullText.length > 200;
+
+          let snippetHTML = isLong
+            ? `<div class="result-snippet snippet-expandable" onclick="toggleSnippet(this)">
+                 <span class="text-short">${fullText.substring(
+                   0,
+                   200
+                 )}... <b>(ver más)</b></span>
+                 <span class="text-full">${fullText}</span>
+               </div>`
+            : `<div class="result-snippet">${fullText}</div>`;
+
+          const card = document.createElement("div");
+          card.className = "result-card";
+          card.innerHTML = `
+             <span style="color:green; font-size:0.8rem">ID: ${idRef}</span>
+             ${snippetHTML}
+          `;
+          list.appendChild(card);
+        });
+      }
+
+      function toggleSnippet(el) {
+        const s = el.querySelector(".text-short");
+        const f = el.querySelector(".text-full");
+        if (getComputedStyle(f).display === "none") {
+          f.style.display = "inline";
+          s.style.display = "none";
+        } else {
+          f.style.display = "none";
+          s.style.display = "inline";
+        }
+      }
+
+      function renderPagination(total, current) {
+        // (Tu misma lógica de paginación va aquí, la omito para no alargar demasiado pero usa la del mensaje anterior)
+        const pagination = document.getElementById("pagination");
+        pagination.innerHTML = ""; // Limpiar
+        if (total <= ROWS_PER_PAGE) return;
+
+        // Simplificado para demostración:
+        if (current > 1) {
+          const prev = document.createElement("button");
+          prev.className = "page-btn";
+          prev.innerText = "<<";
+          prev.onclick = () => triggerSearch(current - 1);
+          pagination.appendChild(prev);
+        }
+        const span = document.createElement("span");
+        span.innerText = `Página ${current}`;
+        span.style.padding = "8px";
+        pagination.appendChild(span);
+
+        if (current * ROWS_PER_PAGE < total) {
+          const next = document.createElement("button");
+          next.className = "page-btn";
+          next.innerText = ">>";
+          next.onclick = () => triggerSearch(current + 1);
+          pagination.appendChild(next);
+        }
+      }
+    </script>
+  </body>
+</html>
