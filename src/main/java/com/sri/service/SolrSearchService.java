@@ -50,7 +50,7 @@ public class SolrSearchService {
                 .collect(Collectors.joining(" OR "));
 
         System.out.println("Ejecutando Query ID " + queryString + ": " + joinedQuery);
-        query.setQuery("body:" + queryString);
+        query.setQuery(joinedQuery);
         query.setFields("id", "body");
         query.setRows(Integer.MAX_VALUE); // Limitar a 50 resultados
         QueryResponse response = solrClient.query(query);
